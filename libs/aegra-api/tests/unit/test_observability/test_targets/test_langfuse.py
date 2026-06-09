@@ -70,3 +70,19 @@ class TestLangfuseTarget:
 
             # Should not have double slash //api...
             assert exporter._endpoint == "https://custom.langfuse.host/api/public/otel/v1/traces"
+
+    def test_ingestion_version_header_set(self):
+        """Test that x-langfuse-ingestion-version: 4 header is passed to OTLPSpanExporter."""
+        with (
+            patch("aegra_api.observability.targets.langfuse.settings") as mock_settings,
+            patch("aegra_api.observability.targets.langfuse.OTLPSpanExporter") as mock_exporter_cls,
+        ):
+            mock_settings.observability.LANGFUSE_PUBLIC_KEY = "pk-test"
+            mock_settings.observability.LANGFUSE_SECRET_KEY = "sk-test"
+            mock_settings.observability.LANGFUSE_BASE_URL = "https://us.cloud.langfuse.com"
+
+            target = LangfuseTarget()
+            target.get_exporter()
+
+            call_kwargs = mock_exporter_cls.call_args[1]
+            assert call_kwargs["headers"]["x-langfuse-ingestion-version"] == "4"

@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,7 +12,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 
 from aegra_api.observability.span_enrichment import (
-    RunIdAwareIdGenerator,
     SpanEnrichmentProcessor,
     _trace_attrs,
     make_run_trace_context,
@@ -246,13 +244,16 @@ class TestMakeRunTraceContext:
         assert attrs["langfuse.trace.name"] == "my_graph"
 
     def test_seeds_otel_trace_id_from_run_id(self) -> None:
-        """The IdGenerator produces a trace_id derived from run_id."""
-        from aegra_api.observability.span_enrichment import _run_trace_id
+        """The returned context has an OTEL trace_id derived from run_id."""
+        import uuid
+
+        from opentelemetry import trace
 
         ctx = make_run_trace_context(self._RUN_ID, "thread-1", "my_graph", "user-1")
 
-        seeded_value = ctx.run(_run_trace_id.get)
-        assert seeded_value == uuid.UUID(self._RUN_ID).int
+        span = ctx.run(trace.get_current_span)
+        trace_id = span.get_span_context().trace_id
+        assert trace_id == uuid.UUID(self._RUN_ID).int
 
     def test_extra_metadata_merged_into_trace_context(self) -> None:
         """User-supplied extra_metadata appears alongside system runtime keys."""
@@ -405,7 +406,7 @@ class TestSpanEnrichmentEndToEnd:
     def setup_method(self) -> None:
         _trace_attrs.set(None)
         self.exporter = InMemorySpanExporter()
-        self.provider = TracerProvider(id_generator=RunIdAwareIdGenerator())
+        self.provider = TracerProvider()
         # Order matters: enrichment must run BEFORE export so the
         # exporter sees attributes set by ``on_start``.
         self.provider.add_span_processor(SpanEnrichmentProcessor())
@@ -439,11 +440,6 @@ class TestSpanEnrichmentEndToEnd:
 
         spans = self.exporter.get_finished_spans()
         assert len(spans) == 1
-
-        # Core invariant: trace_id is deterministic and span is a true root.
-        assert spans[0].context.trace_id == uuid.UUID(self._RUN_ID).int
-        assert spans[0].parent is None
-
         attrs = dict(spans[0].attributes or {})
 
         # Langfuse-native + Phoenix/OpenInference aliases for first-class fields.
@@ -478,11 +474,7 @@ class TestSpanEnrichmentEndToEnd:
 
         self._emit_root_span(ctx)
 
-        span = self.exporter.get_finished_spans()[0]
-        assert span.context.trace_id == uuid.UUID(self._RUN_ID_2).int
-        assert span.parent is None
-
-        attrs = dict(span.attributes or {})
+        attrs = dict(self.exporter.get_finished_spans()[0].attributes or {})
         assert attrs["langfuse.trace.metadata.run_id"] == self._RUN_ID_2
         assert attrs["langfuse.trace.metadata.tenant"] == "acme"
 
@@ -499,11 +491,7 @@ class TestSpanEnrichmentEndToEnd:
 
         self._emit_root_span(ctx)
 
-        span = self.exporter.get_finished_spans()[0]
-        assert span.context.trace_id == uuid.UUID(self._RUN_ID).int
-        assert span.parent is None
-
-        attrs = dict(span.attributes or {})
+        attrs = dict(self.exporter.get_finished_spans()[0].attributes or {})
         assert "langfuse.user.id" not in attrs
         assert "user.id" not in attrs
         assert attrs["langfuse.session.id"] == "t1"

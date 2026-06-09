@@ -137,8 +137,8 @@ class TestSpanEnrichmentProcessor:
         assert calls["session.id"] == "s1"
         assert calls["langfuse.trace.name"] == "graph_x"
 
-    def test_on_start_skips_local_child_spans(self) -> None:
-        """on_start() does NOT enrich local child spans (valid, non-remote parent)."""
+    def test_on_start_enriches_local_child_spans(self) -> None:
+        """on_start() enriches local child spans for Langfuse v4 immutable model."""
         set_trace_context(user_id="u1", session_id="s1", trace_name="graph_x")
         processor = SpanEnrichmentProcessor()
         mock_span = MagicMock()
@@ -148,7 +148,10 @@ class TestSpanEnrichmentProcessor:
 
         processor.on_start(mock_span)
 
-        mock_span.set_attribute.assert_not_called()
+        calls = {call.args[0]: call.args[1] for call in mock_span.set_attribute.call_args_list}
+        assert calls["langfuse.user.id"] == "u1"
+        assert calls["langfuse.session.id"] == "s1"
+        assert calls["langfuse.trace.name"] == "graph_x"
 
     def test_on_start_enriches_span_with_remote_parent(self) -> None:
         """on_start() enriches spans whose parent arrived via W3C traceparent.
@@ -521,3 +524,34 @@ class TestSpanEnrichmentEndToEnd:
         attrs = dict(self.exporter.get_finished_spans()[0].attributes or {})
         assert attrs["langfuse.trace.metadata.tenant"] == "acme"
         assert "langfuse.trace.metadata.nested" not in attrs
+
+    def test_child_spans_receive_same_attributes_as_root(self) -> None:
+        """Child spans receive the same langfuse.* attributes as the root span.
+
+        Required for Langfuse v4 immutable model where each observation must
+        carry its own context — no server-side join from trace to children.
+        """
+        ctx = make_run_trace_context(
+            run_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            thread_id="thread-1",
+            graph_id="my_graph",
+            user_identity="user-1",
+        )
+
+        def _create_parent_and_child() -> None:
+            with self.tracer.start_as_current_span("root_span"):  # noqa: SIM117
+                with self.tracer.start_as_current_span("child_span"):
+                    with self.tracer.start_as_current_span("grandchild_span"):
+                        pass
+
+        ctx.run(_create_parent_and_child)
+
+        spans = self.exporter.get_finished_spans()
+        assert len(spans) == 3
+
+        for span in spans:
+            attrs = dict(span.attributes or {})
+            assert attrs["langfuse.user.id"] == "user-1"
+            assert attrs["langfuse.session.id"] == "thread-1"
+            assert attrs["langfuse.trace.name"] == "my_graph"
+            assert attrs["langfuse.trace.metadata.run_id"] == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"

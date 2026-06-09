@@ -23,10 +23,15 @@ Usage::
 
 import contextvars
 import logging
+import secrets
+import uuid as _uuid
 from typing import Any
 
+from opentelemetry import context as otel_context
+from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,12 @@ class SpanEnrichmentProcessor(SpanProcessor):
         attrs = _trace_attrs.get()
         if not attrs:
             return
+        # Strip the injected remote parent (from seed_otel_trace_id) so the
+        # span exports as a true root.  The trace_id is already correct
+        # (inherited during construction).  Without this, Langfuse cannot
+        # identify a root span and trace-level input/output stay undefined.
+        if span.parent is not None and span.parent.is_remote:
+            span._parent = None  # noqa: SLF001
         for key, value in attrs.items():
             span.set_attribute(key, value)
 
@@ -166,6 +177,27 @@ def merge_run_metadata(
     return merged
 
 
+def seed_otel_trace_id(run_id: str) -> None:
+    """Set a remote-parent span context whose trace_id is derived from *run_id*.
+
+    The ``run_id`` UUID (128-bit) is reused verbatim as the OTEL trace_id so
+    that downstream instrumentors (LangChainInstrumentor) inherit it.  No real
+    span is created or exported — ``NonRecordingSpan`` is the standard OTEL
+    mechanism for W3C ``traceparent`` propagation.
+
+    The ``attach()`` token is intentionally not detached: this function must
+    only be called from a short-lived, task-scoped context (``ctx.run(...)``
+    or a per-job asyncio task) where the context is discarded on completion.
+    """
+    span_ctx = SpanContext(
+        trace_id=_uuid.UUID(run_id).int,
+        span_id=secrets.randbits(64),
+        is_remote=True,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+    )
+    otel_context.attach(trace.set_span_in_context(NonRecordingSpan(span_ctx)))
+
+
 def make_run_trace_context(
     run_id: str,
     thread_id: str,
@@ -191,6 +223,7 @@ def make_run_trace_context(
     }
     metadata = merge_run_metadata(extra_metadata, system_metadata)
     ctx = contextvars.copy_context()
+    ctx.run(seed_otel_trace_id, run_id)
     ctx.run(
         set_trace_context,
         user_id=user_identity,

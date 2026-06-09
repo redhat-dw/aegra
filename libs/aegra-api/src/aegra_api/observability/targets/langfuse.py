@@ -30,4 +30,10 @@ class LangfuseTarget(BaseOtelTarget):
         auth_str = f"{pk}:{sk}"
         auth_b64 = base64.b64encode(auth_str.encode()).decode()
 
-        return OTLPSpanExporter(endpoint=endpoint, headers={"Authorization": f"Basic {auth_b64}"})
+        return OTLPSpanExporter(
+            endpoint=endpoint,
+            headers={
+                "Authorization": f"Basic {auth_b64}",
+                "x-langfuse-ingestion-version": "4",
+            },
+        )

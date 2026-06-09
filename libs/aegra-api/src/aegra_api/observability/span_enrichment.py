@@ -2,8 +2,9 @@
 
 Sets Langfuse-compatible span attributes (``langfuse.user.id``,
 ``langfuse.session.id``, ``langfuse.trace.name``) from per-request
-context variables on the **root span only**, enabling trace enrichment
-without requiring changes to graph code.
+context variables on **every span** in the trace, enabling the Langfuse
+v4 immutable observations model where each observation must carry its
+own context (no server-side join from trace to children).
 
 Also sets Phoenix/OpenInference-compatible aliases (``user.id``,
 ``session.id``) so that the same code works when ``OTEL_TARGETS``
@@ -17,7 +18,7 @@ Usage::
         session_id=thread_id,
         trace_name=graph_id,
     )
-    # The root OTEL span created in this task will carry the attributes.
+    # All OTEL spans created in this task will carry the attributes.
 """
 
 import contextvars
@@ -43,15 +44,13 @@ _trace_attrs: contextvars.ContextVar[dict[str, str | int | float | bool] | None]
 
 
 class SpanEnrichmentProcessor(SpanProcessor):
-    """Injects per-request trace attributes onto the root span of each trace.
+    """Injects per-request trace attributes onto every span in the trace.
 
     Reads from the ``aegra_otel_trace_attrs`` context variable and sets
-    each key/value pair as a span attribute on the **root span** only.
-    A span is considered a root if it has no parent OR if its parent is a
-    remote span (i.e. arrived via W3C ``traceparent`` from an upstream
-    service).  Langfuse reads trace-level properties (userId, sessionId,
-    name) exclusively from the root span, so enriching local child spans
-    is unnecessary and produces noise in per-observation metadata.
+    each key/value pair as a span attribute on **all spans** (root, child,
+    and grandchild).  The Langfuse v4 immutable observations model requires
+    each observation to carry its own userId, sessionId, and traceName — there
+    is no server-side join from trace to children.
 
     Call :func:`set_trace_context` inside the asyncio Task that runs
     graph execution to populate the context variable before any spans
@@ -59,10 +58,6 @@ class SpanEnrichmentProcessor(SpanProcessor):
     """
 
     def on_start(self, span: Span, parent_context: Context | None = None) -> None:
-        if span.parent is not None and span.parent.is_valid and not span.parent.is_remote:
-            # Skip local child spans only — spans whose parent arrived via
-            # a remote traceparent header are still local roots and must be enriched.
-            return
         attrs = _trace_attrs.get()
         if not attrs:
             return

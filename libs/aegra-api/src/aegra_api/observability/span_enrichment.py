@@ -23,7 +23,7 @@ Usage::
 
 import contextvars
 import logging
-import random
+import secrets
 import uuid as _uuid
 from typing import Any
 
@@ -31,7 +31,7 @@ from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
-from opentelemetry.sdk.trace.id_generator import IdGenerator
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +46,6 @@ _PRIMITIVE_ATTR_TYPES: tuple[type, ...] = (str, int, float, bool)
 _trace_attrs: contextvars.ContextVar[dict[str, str | int | float | bool] | None] = contextvars.ContextVar(
     "aegra_otel_trace_attrs", default=None
 )
-
-# Per-request context variable: when set, the IdGenerator uses this
-# UUID's int as the trace_id instead of generating a random one.
-_run_trace_id: contextvars.ContextVar[int | None] = contextvars.ContextVar("aegra_run_trace_id", default=None)
 
 
 class SpanEnrichmentProcessor(SpanProcessor):
@@ -70,6 +66,12 @@ class SpanEnrichmentProcessor(SpanProcessor):
         attrs = _trace_attrs.get()
         if not attrs:
             return
+        # Strip the injected remote parent (from seed_otel_trace_id) so the
+        # span exports as a true root.  The trace_id is already correct
+        # (inherited during construction).  Without this, Langfuse cannot
+        # identify a root span and trace-level input/output stay undefined.
+        if span.parent is not None and span.parent.is_remote:
+            span._parent = None  # noqa: SLF001
         for key, value in attrs.items():
             span.set_attribute(key, value)
 
@@ -176,45 +178,24 @@ def merge_run_metadata(
 
 
 def seed_otel_trace_id(run_id: str) -> None:
-    """Request that the next root span uses ``run_id`` as its OTEL trace_id.
+    """Set a remote-parent span context whose trace_id is derived from *run_id*.
 
-    Sets the ``_run_trace_id`` context variable so that
-    :class:`RunIdAwareIdGenerator` returns ``UUID(run_id).int`` from
-    ``generate_trace_id()`` instead of a random value.  The root span is
-    then constructed with ``parent=None`` naturally — no ``NonRecordingSpan``
-    or private-attribute mutation needed.
+    The ``run_id`` UUID (128-bit) is reused verbatim as the OTEL trace_id so
+    that downstream instrumentors (LangChainInstrumentor) inherit it.  No real
+    span is created or exported — ``NonRecordingSpan`` is the standard OTEL
+    mechanism for W3C ``traceparent`` propagation.
 
-    Must be called inside a task-scoped context (``ctx.run(...)`` or a
-    per-job asyncio task) before any spans are created.
+    The ``attach()`` token is intentionally not detached: this function must
+    only be called from a short-lived, task-scoped context (``ctx.run(...)``
+    or a per-job asyncio task) where the context is discarded on completion.
     """
-    _run_trace_id.set(_uuid.UUID(run_id).int)
-
-
-class RunIdAwareIdGenerator(IdGenerator):
-    """IdGenerator that derives trace_id from run_id when available.
-
-    When ``_run_trace_id`` is set (via :func:`seed_otel_trace_id`), returns
-    that value as the trace_id — giving deterministic Langfuse trace linking.
-    Falls back to random generation otherwise (e.g. for spans created outside
-    a run context, or when upstream W3C traceparent propagation provides the
-    trace_id via normal OTEL machinery).
-    """
-
-    def generate_trace_id(self) -> int:
-        seeded = _run_trace_id.get()
-        if seeded is not None:
-            _run_trace_id.set(None)
-            return seeded
-        trace_id = random.getrandbits(128)
-        while trace_id == trace.INVALID_TRACE_ID:
-            trace_id = random.getrandbits(128)
-        return trace_id
-
-    def generate_span_id(self) -> int:
-        span_id = random.getrandbits(64)
-        while span_id == trace.INVALID_SPAN_ID:
-            span_id = random.getrandbits(64)
-        return span_id
+    span_ctx = SpanContext(
+        trace_id=_uuid.UUID(run_id).int,
+        span_id=secrets.randbits(64),
+        is_remote=True,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+    )
+    otel_context.attach(trace.set_span_in_context(NonRecordingSpan(span_ctx)))
 
 
 def make_run_trace_context(
@@ -242,7 +223,6 @@ def make_run_trace_context(
     }
     metadata = merge_run_metadata(extra_metadata, system_metadata)
     ctx = contextvars.copy_context()
-    ctx.run(otel_context.attach, trace.set_span_in_context(trace.INVALID_SPAN))
     ctx.run(seed_otel_trace_id, run_id)
     ctx.run(
         set_trace_context,

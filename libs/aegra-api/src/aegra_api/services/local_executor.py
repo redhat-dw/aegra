@@ -13,6 +13,8 @@ from aegra_api.core.active_runs import active_runs
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import make_run_trace_context
 from aegra_api.services.base_executor import BaseExecutor
+from aegra_api.services.run_status import finalize_run
+from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
 
@@ -23,8 +25,6 @@ class LocalExecutor(BaseExecutor):
     async def submit(self, job: RunJob) -> None:
         # Deferred import: run_executor imports services that reference
         # the executor singleton, creating a circular chain at module level.
-        from aegra_api.services.run_executor import execute_run
-
         trace_ctx = make_run_trace_context(
             job.identity.run_id,
             job.identity.thread_id,
@@ -32,13 +32,41 @@ class LocalExecutor(BaseExecutor):
             job.user.identity,
             extra_metadata=job.run_metadata,
         )
-        task = asyncio.create_task(execute_run(job), context=trace_ctx)
+        task = asyncio.create_task(self._execute_with_timeout(job), context=trace_ctx)
         active_runs[job.identity.run_id] = task
         logger.info(
             "Submitted run to local executor",
             run_id=job.identity.run_id,
             task_id=id(task),
         )
+
+    async def _execute_with_timeout(self, job: RunJob) -> None:
+        # Deferred import: run_executor imports services that reference
+        # the executor singleton, creating a circular chain at module level.
+        from aegra_api.services.run_executor import execute_run
+
+        run_id = job.identity.run_id
+        thread_id = job.identity.thread_id
+        try:
+            await asyncio.wait_for(execute_run(job), timeout=settings.worker.BG_JOB_TIMEOUT_SECS)
+        except TimeoutError:
+            logger.error(
+                "Local job exceeded timeout, killing",
+                run_id=run_id,
+                timeout_secs=settings.worker.BG_JOB_TIMEOUT_SECS,
+            )
+            await finalize_run(
+                run_id,
+                thread_id,
+                status="error",
+                thread_status="error",
+                error="Job exceeded maximum execution time",
+            )
+        except asyncio.CancelledError:
+            logger.info("Local job task cancelled", run_id=run_id)
+            raise
+        finally:
+            active_runs.pop(run_id, None)
 
     async def wait_for_completion(self, run_id: str, *, timeout: float = 300.0) -> None:
         task = active_runs.get(run_id)

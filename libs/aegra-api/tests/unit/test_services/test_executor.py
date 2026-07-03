@@ -84,6 +84,93 @@ class TestLocalExecutor:
         assert task.done()
         active_runs.pop("run-hang", None)
 
+    @pytest.mark.asyncio
+    async def test_submit_times_out_and_marks_run_error(self) -> None:
+        executor = LocalExecutor()
+        timeout_error = "Job exceeded maximum execution time"
+
+        async def slow_execute(_job: RunJob) -> None:
+            await asyncio.sleep(9999)
+
+        with (
+            patch("aegra_api.services.run_executor.execute_run", side_effect=slow_execute),
+            patch("aegra_api.services.local_executor.make_run_trace_context", return_value=None),
+            patch("aegra_api.services.local_executor.settings", create=True) as mock_settings,
+            patch("aegra_api.services.local_executor.finalize_run", new_callable=AsyncMock, create=True) as mock_finalize,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 0.01
+
+            job = _make_job()
+            await executor.submit(job)
+
+            from aegra_api.core.active_runs import active_runs
+
+            task = active_runs["run-1"]
+            await asyncio.sleep(0.05)
+            assert task.done()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        mock_finalize.assert_awaited_once_with(
+            "run-1",
+            "thread-1",
+            status="error",
+            thread_status="error",
+            error=timeout_error,
+        )
+        assert "run-1" not in active_runs
+
+    @pytest.mark.asyncio
+    async def test_submit_cancel_does_not_mark_timeout_error(self) -> None:
+        executor = LocalExecutor()
+
+        async def slow_execute(_job: RunJob) -> None:
+            await asyncio.sleep(9999)
+
+        with (
+            patch("aegra_api.services.run_executor.execute_run", side_effect=slow_execute),
+            patch("aegra_api.services.local_executor.make_run_trace_context", return_value=None),
+            patch("aegra_api.services.local_executor.settings", create=True) as mock_settings,
+            patch("aegra_api.services.local_executor.finalize_run", new_callable=AsyncMock, create=True) as mock_finalize,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 3600
+
+            job = _make_job()
+            await executor.submit(job)
+
+            from aegra_api.core.active_runs import active_runs
+
+            task = active_runs["run-1"]
+            await asyncio.sleep(0)
+            task.cancel()
+            results = await asyncio.gather(task, return_exceptions=True)
+
+        assert len(results) == 1
+        assert isinstance(results[0], asyncio.CancelledError)
+        mock_finalize.assert_not_awaited()
+        assert "run-1" not in active_runs
+
+    @pytest.mark.asyncio
+    async def test_wait_for_completion_timeout_does_not_cancel_task(self) -> None:
+        executor = LocalExecutor()
+
+        from aegra_api.core.active_runs import active_runs
+
+        async def hang_forever() -> None:
+            await asyncio.sleep(9999)
+
+        task = asyncio.create_task(hang_forever())
+        active_runs["run-wait"] = task
+
+        await executor.wait_for_completion("run-wait", timeout=0.01)
+
+        assert not task.done()
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        active_runs.pop("run-wait", None)
+
 
 class TestRunExecutorBoundaryConditions:
     """Boundary condition tests for run_executor edge cases."""

@@ -84,14 +84,14 @@ For platforms like Railway, Render, or Fly.io — use `aegra serve`:
 aegra serve
 ```
 
-This runs uvicorn directly without starting PostgreSQL. You provide a running database instance via environment variables. Redis is only required when `REDIS_BROKER_ENABLED=true` (recommended for multi-instance production deployments). Without Redis, runs execute as in-process asyncio tasks — suitable for single-instance deployments.
+This runs uvicorn directly without starting PostgreSQL. You provide a running database instance via environment variables. Redis is only required when `REDIS_BROKER_ENABLED=true` (recommended for multi-instance production deployments). Without Redis, runs execute as in-process asyncio tasks with the same `BG_JOB_TIMEOUT_SECS` hard timeout — suitable for single-instance deployments.
 
 <Steps>
   <Step title="Create a PostgreSQL addon on your platform">
     Most PaaS platforms offer managed PostgreSQL. Create one and get the connection URL.
   </Step>
   <Step title="Create a Redis addon">
-    For production workloads, add a managed Redis instance. This enables the worker job queue, cross-instance SSE streaming, and crash recovery. Without Redis (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio tasks (suitable for single-instance deployments).
+    For production workloads, add a managed Redis instance. This enables the worker job queue, cross-instance SSE streaming, and crash recovery. Without Redis (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio tasks with the same hard timeout budget (suitable for single-instance deployments).
   </Step>
   <Step title="Set environment variables">
     ```bash

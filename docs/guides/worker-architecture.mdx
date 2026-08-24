@@ -5,7 +5,7 @@ description: "How Aegra dispatches, executes, and recovers agent runs at scale."
 
 Aegra uses a worker-based execution model for production deployments. Runs are dispatched through a Redis job queue and executed by concurrent asyncio workers across any number of instances. Lease-based crash recovery ensures no run is lost, even if an instance dies mid-execution.
 
-In dev mode (`aegra dev`), none of this is needed — runs execute as simple in-process asyncio tasks.
+In dev mode (`aegra dev`), none of this is needed — runs execute as simple in-process asyncio tasks, but still honor `BG_JOB_TIMEOUT_SECS`.
 
 ## Run lifecycle overview
 
@@ -248,7 +248,7 @@ sequenceDiagram
 
 | | Dev (`aegra dev`) | Production (`aegra up` / `aegra serve`) |
 |---|---|---|
-| Executor | `LocalExecutor` — `asyncio.create_task()` | `WorkerExecutor` — BLPOP + semaphore + lease |
+| Executor | `LocalExecutor` — `asyncio.create_task()` with timeout guard | `WorkerExecutor` — BLPOP + semaphore + lease |
 | Redis required | No | Yes |
 | Crash recovery | No (single process) | Yes (lease reaper) |
 | Cross-instance cancel | N/A | Yes (Redis pub/sub) |
@@ -280,7 +280,7 @@ All worker settings are configured via environment variables. See the [environme
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
 | `WORKER_COUNT` | `3` | Worker loops per instance |
 | `N_JOBS_PER_WORKER` | `10` | Concurrent runs per worker loop |
-| `BG_JOB_TIMEOUT_SECS` | `3600` | Max execution time per run (1 hour) |
+| `BG_JOB_TIMEOUT_SECS` | `3600` | Max execution time per run in both dev and production (1 hour) |
 | `BG_JOB_MAX_RETRIES` | `3` | Max retry attempts before a crashed run is permanently failed |
 | `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it |
 | `LEASE_DURATION_SECONDS` | `30` | Lease TTL before reaper reclaims |
@@ -299,7 +299,7 @@ All worker settings are configured via environment variables. See the [environme
 |:-----|:--------|
 | `services/executor.py` | Factory — selects `LocalExecutor` or `WorkerExecutor` |
 | `services/base_executor.py` | Abstract interface: submit, wait, start, stop |
-| `services/local_executor.py` | Dev mode: `asyncio.create_task` |
+| `services/local_executor.py` | Dev mode: `asyncio.create_task()` with timeout guard |
 | `services/worker_executor.py` | Production mode: BLPOP + semaphore + lease + heartbeat |
 | `services/run_executor.py` | Shared execution logic (used by both executors) |
 | `services/run_status.py` | Database status updates |

@@ -4,6 +4,7 @@ Orchestrates trace generation and fan-out export to multiple targets.
 """
 
 import logging
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 from openinference.instrumentation.langchain import LangChainInstrumentor
@@ -23,6 +24,49 @@ from aegra_api.observability.targets import (
 from aegra_api.settings import settings
 
 logger = logging.getLogger(__name__)
+
+_USER_ID_ATTR = "user.id"
+_LANGFUSE_USER_ID_ATTR = "langfuse.user.id"
+
+
+def _user_span_attributes(metadata: Mapping[str, Any] | None) -> Iterator[tuple[str, str]]:
+    """Yield Langfuse user attributes from LangChain run metadata.
+
+    OpenInference promotes ``session_id`` to ``session.id`` and leaves
+    ``user_id`` inside the metadata JSON. Langfuse cost-by-user reads
+    ``user.id`` / ``langfuse.user.id`` on each span, including generations
+    started outside the trace-context variable.
+    """
+    if not isinstance(metadata, Mapping):
+        return
+    user_id = metadata.get("langfuse_user_id") or metadata.get("user_id")
+    if not isinstance(user_id, str) or not user_id:
+        return
+    yield _USER_ID_ATTR, user_id
+    yield _LANGFUSE_USER_ID_ATTR, user_id
+
+
+def _install_langchain_user_attributes() -> None:
+    """Copy user id onto LangChain spans when OpenInference finishes them.
+
+    ``_metadata`` runs inside ``_update_span``, before ``span.end()``, so
+    the attributes are still writable. A later callback would race the
+    instrumentor, which ends the span in parallel.
+    """
+    from openinference.instrumentation.langchain import _tracer as oi_tracer
+
+    current = oi_tracer._metadata
+    if getattr(current, "_aegra_user_wrapped", False):
+        return
+
+    def _metadata(run: Any) -> Iterator[tuple[str, Any]]:
+        yield from current(run)
+        extra = getattr(run, "extra", None)
+        metadata = extra.get("metadata") if isinstance(extra, Mapping) else None
+        yield from _user_span_attributes(metadata if isinstance(metadata, Mapping) else None)
+
+    _metadata._aegra_user_wrapped = True  # type: ignore[attr-defined]
+    oi_tracer._metadata = _metadata
 
 
 class OpenTelemetryProvider(ObservabilityProvider):
@@ -123,6 +167,7 @@ class OpenTelemetryProvider(ObservabilityProvider):
         if processors_count > 0:
             trace.set_tracer_provider(self._tracer_provider)
             LangChainInstrumentor().instrument(tracer_provider=self._tracer_provider)
+            _install_langchain_user_attributes()
             logger.info("Observability: Auto-instrumentation enabled")
 
     def get_callbacks(self) -> list[Any]:

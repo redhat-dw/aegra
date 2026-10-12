@@ -332,3 +332,101 @@ class TestOpenTelemetryProviderRuntime:
 
             meta = provider.get_metadata("run-1", "thread-1")
             assert meta == {}
+
+
+class TestOpenTelemetryProviderForceFlush:
+    """Tests for the force_flush() method."""
+
+    def test_force_flush_calls_tracer_provider(self) -> None:
+        """force_flush delegates to TracerProvider.force_flush with correct timeout."""
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = ""
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = True
+
+            provider = OpenTelemetryProvider()
+            mock_tp = MagicMock()
+            provider._tracer_provider = mock_tp
+
+            provider.force_flush(timeout_millis=5000)
+
+            mock_tp.force_flush.assert_called_once_with(timeout_millis=5000)
+
+    def test_force_flush_uses_default_timeout(self) -> None:
+        """force_flush uses 10s default timeout when not specified."""
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = ""
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = True
+
+            provider = OpenTelemetryProvider()
+            mock_tp = MagicMock()
+            provider._tracer_provider = mock_tp
+
+            provider.force_flush()
+
+            mock_tp.force_flush.assert_called_once_with(timeout_millis=10_000)
+
+    def test_force_flush_noop_when_no_tracer_provider(self) -> None:
+        """force_flush is a no-op when setup() has not been called."""
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = ""
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = False
+
+            provider = OpenTelemetryProvider()
+            assert provider._tracer_provider is None
+
+            provider.force_flush()
+
+    def test_force_flush_logs_warning_on_runtime_error(self) -> None:
+        """force_flush catches RuntimeError and logs a warning."""
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = ""
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = True
+
+            provider = OpenTelemetryProvider()
+            mock_tp = MagicMock()
+            mock_tp.force_flush.side_effect = RuntimeError("export failed")
+            provider._tracer_provider = mock_tp
+
+            with patch("aegra_api.observability.otel.logger") as mock_logger:
+                provider.force_flush()
+
+                mock_logger.warning.assert_called_once()
+                assert "force_flush failed" in mock_logger.warning.call_args.args[0]
+
+    def test_force_flush_logs_warning_on_timeout_error(self) -> None:
+        """force_flush catches TimeoutError and logs a warning."""
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = ""
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = True
+
+            provider = OpenTelemetryProvider()
+            mock_tp = MagicMock()
+            mock_tp.force_flush.side_effect = TimeoutError("flush deadline exceeded")
+            provider._tracer_provider = mock_tp
+
+            with patch("aegra_api.observability.otel.logger") as mock_logger:
+                provider.force_flush()
+
+                mock_logger.warning.assert_called_once()
+
+
+class TestFlushOtelSpans:
+    """Tests for the module-level flush_otel_spans() convenience function."""
+
+    def test_delegates_to_otel_provider(self) -> None:
+        """flush_otel_spans calls otel_provider.force_flush."""
+        with patch("aegra_api.observability.otel.otel_provider") as mock_provider:
+            from aegra_api.observability.otel import flush_otel_spans
+
+            flush_otel_spans()
+
+            mock_provider.force_flush.assert_called_once_with(timeout_millis=10_000)
+
+    def test_passes_custom_timeout(self) -> None:
+        """flush_otel_spans forwards timeout_millis to provider."""
+        with patch("aegra_api.observability.otel.otel_provider") as mock_provider:
+            from aegra_api.observability.otel import flush_otel_spans
+
+            flush_otel_spans(timeout_millis=5000)
+
+            mock_provider.force_flush.assert_called_once_with(timeout_millis=5000)

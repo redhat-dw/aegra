@@ -15,6 +15,7 @@ from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
+from aegra_api.observability.otel import flush_otel_spans
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.graph_streaming import stream_graph_events
 from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
@@ -93,6 +94,7 @@ async def execute_run(job: RunJob) -> None:
         _lease_loss_cancellations.discard(run_id)
         active_runs.pop(run_id, None)
         if not is_lease_loss:
+            await _best_effort_flush(run_id)
             await streaming_service.cleanup_run(run_id)
             await _signal_run_done(run_id)
 
@@ -100,6 +102,14 @@ async def execute_run(job: RunJob) -> None:
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
+
+
+async def _best_effort_flush(run_id: str) -> None:
+    """Flush OTEL spans to exporters without blocking cleanup on failure."""
+    try:
+        await asyncio.to_thread(flush_otel_spans)
+    except BaseException:
+        logger.warning("OTEL span flush failed (best-effort)", run_id=run_id)
 
 
 async def _best_effort_signal(fn: Any, *args: Any) -> None:

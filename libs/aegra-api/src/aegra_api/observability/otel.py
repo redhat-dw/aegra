@@ -130,6 +130,15 @@ class OpenTelemetryProvider(ObservabilityProvider):
             self.setup()
         return []
 
+    def force_flush(self, *, timeout_millis: int = 10_000) -> None:
+        """Flush pending spans so BSP doesn't silently drop the root span."""
+        if self._tracer_provider is None:
+            return
+        try:
+            self._tracer_provider.force_flush(timeout_millis=timeout_millis)
+        except (RuntimeError, TimeoutError, OSError):
+            logger.warning("TracerProvider force_flush failed (best-effort)", exc_info=True)
+
     def get_metadata(self, run_id: str, thread_id: str, user_identity: str | None = None) -> dict[str, Any]:
         if not self.is_enabled():
             return {}
@@ -153,3 +162,8 @@ class OpenTelemetryProvider(ObservabilityProvider):
 
 
 otel_provider = OpenTelemetryProvider()
+
+
+def flush_otel_spans(*, timeout_millis: int = 10_000) -> None:
+    """Convenience wrapper so callers don't depend on the singleton directly."""
+    otel_provider.force_flush(timeout_millis=timeout_millis)

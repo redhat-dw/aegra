@@ -4,7 +4,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aegra_api.observability.otel import OpenTelemetryProvider
+from aegra_api.observability.otel import (
+    OpenTelemetryProvider,
+    _install_langchain_user_attributes,
+    _user_span_attributes,
+)
 from aegra_api.observability.span_enrichment import RunIdAwareIdGenerator
 from aegra_api.observability.targets import (
     BaseOtelTarget,
@@ -332,3 +336,43 @@ class TestOpenTelemetryProviderRuntime:
 
             meta = provider.get_metadata("run-1", "thread-1")
             assert meta == {}
+
+
+class TestGenerationUserAttributes:
+    """User id copied onto LangChain spans from run metadata."""
+
+    def test_prefers_langfuse_user_id(self) -> None:
+        attrs = dict(_user_span_attributes({"user_id": "plain", "langfuse_user_id": "lf-user"}))
+        assert attrs == {"user.id": "lf-user", "langfuse.user.id": "lf-user"}
+
+    def test_falls_back_to_user_id(self) -> None:
+        attrs = dict(_user_span_attributes({"user_id": "plain"}))
+        assert attrs == {"user.id": "plain", "langfuse.user.id": "plain"}
+
+    def test_skips_missing_or_blank_user(self) -> None:
+        assert list(_user_span_attributes(None)) == []
+        assert list(_user_span_attributes({})) == []
+        assert list(_user_span_attributes({"user_id": ""})) == []
+        assert list(_user_span_attributes({"user_id": 12})) == []
+
+    def test_install_appends_user_attrs_after_existing_metadata(self) -> None:
+        import openinference.instrumentation.langchain._tracer as oi_tracer
+
+        original = oi_tracer._metadata
+
+        def _session_only(run: object) -> object:
+            del run
+            yield "session.id", "thread-1"
+
+        try:
+            oi_tracer._metadata = _session_only
+            _install_langchain_user_attributes()
+            pairs = dict(
+                oi_tracer._metadata(type("Run", (), {"extra": {"metadata": {"langfuse_user_id": "user-1"}}})())
+            )
+        finally:
+            oi_tracer._metadata = original
+
+        assert pairs["session.id"] == "thread-1"
+        assert pairs["user.id"] == "user-1"
+        assert pairs["langfuse.user.id"] == "user-1"

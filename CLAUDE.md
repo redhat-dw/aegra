@@ -79,7 +79,7 @@ aegra/
 
 ### Run Execution Architecture
 - **Production mode** (`REDIS_BROKER_ENABLED=true`): Runs are dispatched via a Redis job queue (BLPOP). Workers run as concurrent asyncio tasks inside each instance (default: 3 workers x 10 jobs = 30 concurrent runs per instance). Lease-based crash recovery with heartbeat and reaper. Execution params stored in Postgres so workers can reconstruct jobs. OpenTelemetry trace context propagates across the Redis queue boundary.
-- **Dev mode** (`aegra dev`, `REDIS_BROKER_ENABLED=false`): Runs execute as in-process asyncio tasks via `LocalExecutor`. No Redis needed. SSE uses an in-memory broker.
+- **Dev mode** (`aegra dev`, `REDIS_BROKER_ENABLED=false`): Runs execute as in-process asyncio tasks via `LocalExecutor`. No Redis needed. SSE uses an in-memory broker, and `BG_JOB_TIMEOUT_SECS` still applies as a hard execution timeout.
 - Key files: `services/executor.py` (factory), `services/local_executor.py` (dev), `services/worker_executor.py` (prod), `services/lease_reaper.py` (crash recovery), `models/run_job.py` (serialized execution params).
 - See `docs/guides/worker-architecture.mdx` for the full architecture documentation.
 

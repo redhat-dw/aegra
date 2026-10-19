@@ -37,6 +37,13 @@ _DEFAULT_STREAM_MODES = ["values"]
 # worker's status.
 _lease_loss_cancellations: set[str] = set()
 
+# Run IDs whose cancellation was triggered by a BG_JOB_TIMEOUT_SECS timeout
+# in LocalExecutor. The caller (local_executor._execute_with_timeout) adds the
+# run_id here before cancelling the task, then handles finalize_run itself with
+# status="error". execute_run's CancelledError handler skips its own
+# finalize_run so only one DB write occurs.
+_timeout_cancellations: set[str] = set()
+
 
 async def execute_run(job: RunJob) -> None:
     """Execute a graph run, stream events to the broker, and update DB.
@@ -77,6 +84,17 @@ async def execute_run(job: RunJob) -> None:
             # The new worker owns the run now.
             is_lease_loss = True
             logger.info("Lease-loss cancel, skipping finalize", run_id=run_id)
+        elif run_id in _timeout_cancellations:
+            # Timeout cancel — LocalExecutor will finalize with status="error".
+            # Signal SSE clients here (before cleanup_run marks broker finished),
+            # then skip finalize to avoid a double write.
+            logger.info("Timeout cancel, deferring finalize to caller", run_id=run_id)
+            await _best_effort_signal(
+                streaming_service.signal_run_error,
+                run_id,
+                "Job exceeded maximum execution time",
+                "TimeoutError",
+            )
         else:
             await finalize_run(run_id, thread_id, status="interrupted", thread_status="idle", output={})
             await _best_effort_signal(streaming_service.signal_run_cancelled, run_id)
@@ -91,6 +109,7 @@ async def execute_run(job: RunJob) -> None:
         await _best_effort_signal(_signal_end_event, run_id, status)
     finally:
         _lease_loss_cancellations.discard(run_id)
+        _timeout_cancellations.discard(run_id)
         active_runs.pop(run_id, None)
         if not is_lease_loss:
             await streaming_service.cleanup_run(run_id)

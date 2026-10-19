@@ -111,13 +111,13 @@ Aegra uses two connection pools: one for SQLAlchemy (metadata) and one for LangG
 
 When `REDIS_BROKER_ENABLED=true`, runs are dispatched via a Redis job queue (BLPOP) and executed by concurrent asyncio worker tasks. Each instance runs multiple worker loops, each with a semaphore limiting concurrent jobs. Workers use lease-based crash recovery with heartbeats and a reaper process. See the [worker architecture guide](/guides/worker-architecture) for the full design.
 
-In dev mode (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio tasks with no Redis required.
+In dev mode (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio tasks with no Redis required. `BG_JOB_TIMEOUT_SECS` still applies: `LocalExecutor` cancels the run and marks it as errored when the timeout expires.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKER_COUNT` | `3` | Number of worker loops per instance |
 | `N_JOBS_PER_WORKER` | `10` | Maximum concurrent runs per worker loop |
-| `BG_JOB_TIMEOUT_SECS` | `3600` | Maximum execution time per run (seconds) |
+| `BG_JOB_TIMEOUT_SECS` | `3600` | Maximum execution time per run in both local and worker modes (seconds) |
 | `BG_JOB_MAX_RETRIES` | `3` | Maximum retry attempts before a crashed run is permanently failed |
 | `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it |
 | `LEASE_DURATION_SECONDS` | `30` | Lease TTL before a crashed run is reclaimed |
